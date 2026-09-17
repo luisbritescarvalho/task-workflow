@@ -7,7 +7,7 @@ task XING-12345
   → read JIRA title + description
   → git fetch origin master
   → branch from latest origin/master
-  → Herdr worktree/workspace
+  → Git worktree + independent Herdr workspace
   → Herdr tabs: codex + terminal
   → start Codex and send JIRA context
   → assign a persistent curated task color
@@ -100,7 +100,9 @@ workflow. Run `herdr config check` before reloading.
 
 The sidebar gets a narrow colored `▌` identity marker. The same palette/hex value is written to the VS Code workspace for Peacock.
 
-Herdr workspace metadata is runtime state, so the CLI re-applies the marker on `task open` / task creation.
+Herdr workspace metadata is runtime state, so the CLI re-applies the marker on
+task creation, `task open`, and `task code` whenever the registered Herdr
+workspace is live.
 
 ## 4. Use it
 
@@ -132,11 +134,16 @@ To register an existing local branch:
 task XING-12345 --branch existing-branch-name
 ```
 
-If that branch is already checked out in a Git worktree, the CLI adopts and
-opens that worktree in Herdr. Otherwise, Herdr creates a worktree for the
-existing branch. This mode never fetches, resets, rebases, or recreates the
-branch; the `origin/master` base applies only when the CLI creates a new branch.
-The command refuses branches or worktrees already registered to another task.
+If that branch is already checked out in a Git worktree, the CLI adopts it.
+Otherwise, Git creates a worktree for the existing branch. This mode never
+fetches, resets, rebases, or recreates the branch; the `origin/master` base
+applies only when the CLI creates a new branch. The command refuses branches
+or worktrees already registered to another task.
+
+The CLI deliberately uses `git worktree add` followed by `herdr workspace
+create`. Herdr's `worktree create/open` commands group linked worktree
+workspaces under the repository's primary workspace; ordinary workspace
+creation keeps every task as an independent top-level Herdr workspace.
 
 Inside the task worktree or from the active Herdr workspace:
 
@@ -161,6 +168,7 @@ The persistent registry and generated VS Code workspaces live under:
 ```text
 ~/.local/share/task-workflow/
   tasks.json
+  worktrees/
   vscode/
     XING-12345.code-workspace
 ```

@@ -55,29 +55,24 @@ if (command === 'git') {
     }
     console.log(blocks.join('\\n\\n'));
   }
+  else if (args[0] === 'worktree' && args[1] === 'add') {
+    const branchIndex = args.indexOf('-b');
+    const worktree = branchIndex === -1 ? args[2] : args[branchIndex + 2];
+    fs.mkdirSync(worktree, { recursive: true });
+  }
   process.exit(0);
 }
 
 if (command === 'herdr') {
   if (args[0] === 'status') process.exit(0);
-  if (args[0] === 'worktree' && args[1] === 'create') {
-    const branch = args[args.indexOf('--branch') + 1];
-    const worktree = path.join(process.env.FAKE_ROOT, 'worktrees', branch);
-    fs.mkdirSync(worktree, { recursive: true });
-    console.log(JSON.stringify({ result: {
-      workspace: { workspace_id: 'wT' },
-      tab: { tab_id: 'wT:t1' },
-      root_pane: { pane_id: 'wT:p1' },
-      worktree: { path: worktree },
-    } }));
-    process.exit(0);
+  if (args[0] === 'workspace' && args[1] === 'get') {
+    process.exit(process.env.FAKE_WORKSPACE_EXISTS === 'yes' ? 0 : 1);
   }
-  if (args[0] === 'worktree' && args[1] === 'open') {
+  if (args[0] === 'workspace' && args[1] === 'create') {
     console.log(JSON.stringify({ result: {
       workspace: { workspace_id: 'wT' },
       tab: { tab_id: 'wT:t1' },
       root_pane: { pane_id: 'wT:p1' },
-      worktree: { path: args[args.indexOf('--path') + 1] },
     } }));
     process.exit(0);
   }
@@ -110,7 +105,9 @@ process.exit(2);
     FAKE_ROOT: root,
     FAKE_BRANCH_EXISTS: branchExists ? 'yes' : 'no',
     FAKE_CHECKED_OUT: checkedOut ? 'yes' : 'no',
+    FAKE_WORKSPACE_EXISTS: 'yes',
     FAKE_EXISTING_WORKTREE: path.join(root, 'existing-worktree'),
+    TASK_WORKFLOW_WORKTREE_DIR: path.join(root, 'worktrees'),
   };
 
   if (checkedOut) fs.mkdirSync(env.FAKE_EXISTING_WORKTREE);
@@ -146,11 +143,16 @@ test('creates a registered task from JIRA and origin/master', () => {
   const recorded = calls(fixture);
   const authIndex = recorded.findIndex(({ command, args }) => command === 'acli' && args.join(' ') === 'jira auth status');
   const fetchIndex = recorded.findIndex(({ command, args }) => command === 'git' && args[0] === 'fetch');
-  const createIndex = recorded.findIndex(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'worktree create');
-  assert.ok(authIndex >= 0 && authIndex < fetchIndex && fetchIndex < createIndex);
+  const worktreeIndex = recorded.findIndex(({ command, args }) => command === 'git' && args.slice(0, 2).join(' ') === 'worktree add');
+  const workspaceIndex = recorded.findIndex(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'workspace create');
+  assert.ok(authIndex >= 0 && authIndex < fetchIndex && fetchIndex < worktreeIndex && worktreeIndex < workspaceIndex);
 
-  const worktreeCreate = recorded[createIndex].args;
-  assert.equal(worktreeCreate[worktreeCreate.indexOf('--base') + 1], 'origin/master');
+  const worktreeCreate = recorded[worktreeIndex].args;
+  assert.deepEqual(worktreeCreate.slice(-2), [task.worktree, 'origin/master']);
+  assert.equal(worktreeCreate[worktreeCreate.indexOf('-b') + 1], task.branch);
+  const workspaceCreate = recorded[workspaceIndex].args;
+  assert.equal(workspaceCreate[workspaceCreate.indexOf('--cwd') + 1], task.worktree);
+  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
   const prompt = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'agent prompt');
   assert.match(prompt.args[3], /Track all clicks\./);
 });
@@ -167,10 +169,10 @@ test('authentication failure aborts before Git fetch or Herdr mutation', () => {
   assert.match(result.stderr, /acli jira auth login --web/);
   const recorded = calls(fixture);
   assert.equal(recorded.some(({ command, args }) => command === 'git' && args[0] === 'fetch'), false);
-  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'worktree create'), false);
+  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
 });
 
-test('creates a Herdr worktree for an existing local branch without rebasing it', () => {
+test('creates a Git worktree and standalone Herdr workspace for an existing local branch', () => {
   const fixture = makeFixture({ branchExists: true });
   const result = spawnSync(process.execPath, [cli, 'XING-123', '--branch', 'already-started'], {
     cwd: fixture.repo,
@@ -184,10 +186,13 @@ test('creates a Herdr worktree for an existing local branch without rebasing it'
 
   const recorded = calls(fixture);
   assert.equal(recorded.some(({ command, args }) => command === 'git' && args[0] === 'fetch'), false);
-  const create = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'worktree create');
+  const create = recorded.find(({ command, args }) => command === 'git' && args.slice(0, 2).join(' ') === 'worktree add');
   assert.ok(create);
-  assert.equal(create.args.includes('--base'), false);
-  assert.equal(create.args[create.args.indexOf('--branch') + 1], 'already-started');
+  assert.equal(create.args.includes('-b'), false);
+  assert.equal(create.args.at(-1), 'already-started');
+  const workspace = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'workspace create');
+  assert.ok(workspace);
+  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
 });
 
 test('adopts the existing worktree when the local branch is already checked out', () => {
@@ -204,12 +209,54 @@ test('adopts the existing worktree when the local branch is already checked out'
 
   const recorded = calls(fixture);
   assert.equal(recorded.some(({ command, args }) => command === 'git' && args[0] === 'fetch'), false);
-  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'worktree create'), false);
-  const open = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'worktree open');
-  assert.equal(open.args[open.args.indexOf('--path') + 1], fixture.env.FAKE_EXISTING_WORKTREE);
+  assert.equal(recorded.some(({ command, args }) => command === 'git' && args.slice(0, 2).join(' ') === 'worktree add'), false);
+  const workspace = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'workspace create');
+  assert.equal(workspace.args[workspace.args.indexOf('--cwd') + 1], fixture.env.FAKE_EXISTING_WORKTREE);
+  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
 });
 
-test('task code resolves an explicit Herdr workspace ID', () => {
+test('recreates a missing Herdr workspace as a standalone workspace', () => {
+  const fixture = makeFixture();
+  const worktree = path.join(fixture.root, 'existing-worktree');
+  const vscodeWorkspace = path.join(fixture.state, 'vscode', 'XING-123.code-workspace');
+  fs.mkdirSync(path.dirname(vscodeWorkspace), { recursive: true });
+  fs.mkdirSync(worktree);
+  fs.writeFileSync(vscodeWorkspace, '{}\n');
+  fs.writeFileSync(path.join(fixture.state, 'tasks.json'), JSON.stringify({
+    version: 1,
+    tasks: {
+      'XING-123': {
+        ticket: 'XING-123',
+        title: 'Improve recommendation tracking',
+        repo: fixture.repo,
+        branch: 'already-started',
+        worktree,
+        label: 'XING-123 · Improve recommendation tracking',
+        herdrWorkspaceId: 'missing',
+        vscodeWorkspace,
+        color: { name: 'blue', hex: '#3A7CA5' },
+        status: 'ready',
+      },
+    },
+  }));
+
+  const result = spawnSync(process.execPath, [cli, 'open', 'XING-123'], {
+    cwd: fixture.repo,
+    env: { ...fixture.env, FAKE_WORKSPACE_EXISTS: 'no' },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const registry = JSON.parse(fs.readFileSync(path.join(fixture.state, 'tasks.json'), 'utf8'));
+  assert.equal(registry.tasks['XING-123'].herdrWorkspaceId, 'wT');
+  assert.equal(registry.tasks['XING-123'].herdrWorkspaceMode, 'standalone');
+  const recorded = calls(fixture);
+  const workspace = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'workspace create');
+  assert.equal(workspace.args[workspace.args.indexOf('--cwd') + 1], worktree);
+  assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
+});
+
+test('task code resolves an explicit Herdr workspace ID and reapplies its color', () => {
   const fixture = makeFixture();
   const worktree = path.join(fixture.root, 'worktree');
   const vscodeWorkspace = path.join(fixture.state, 'vscode', 'XING-123.code-workspace');
@@ -236,6 +283,20 @@ test('task code resolves an explicit Herdr workspace ID', () => {
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  const codeCall = calls(fixture).find(({ command }) => command === 'code');
+  const recorded = calls(fixture);
+  const colorCall = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'workspace report-metadata');
+  assert.deepEqual(colorCall.args, [
+    'workspace', 'report-metadata', 'wT',
+    '--source', 'task-cli',
+    '--clear-token', 'task_purple',
+    '--clear-token', 'task_teal',
+    '--clear-token', 'task_orange',
+    '--clear-token', 'task_red',
+    '--clear-token', 'task_green',
+    '--clear-token', 'task_indigo',
+    '--clear-token', 'task_brown',
+    '--token', 'task_blue=▌',
+  ]);
+  const codeCall = recorded.find(({ command }) => command === 'code');
   assert.deepEqual(codeCall.args, [vscodeWorkspace]);
 });

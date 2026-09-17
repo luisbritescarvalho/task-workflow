@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,7 @@ import path from 'node:path';
 const HOME = os.homedir();
 const STATE_DIR = process.env.TASK_WORKFLOW_HOME || path.join(HOME, '.local', 'share', 'task-workflow');
 const VSCODE_DIR = path.join(STATE_DIR, 'vscode');
+const WORKTREE_DIR = process.env.TASK_WORKFLOW_WORKTREE_DIR || path.join(STATE_DIR, 'worktrees');
 const REGISTRY_FILE = path.join(STATE_DIR, 'tasks.json');
 const HERDR_CONFIG_FILE = process.env.HERDR_CONFIG_PATH || path.join(HOME, '.config', 'herdr', 'config.toml');
 const JIRA_LOGIN_COMMAND = 'acli jira auth login --web';
@@ -199,6 +201,27 @@ function findWorktree(repo, branch) {
   return worktree;
 }
 
+function worktreePath(repo, branch) {
+  const repoName = slugify(path.basename(repo)) || 'repo';
+  const repoHash = createHash('sha256').update(repo).digest('hex').slice(0, 8);
+  return path.join(WORKTREE_DIR, `${repoName}-${repoHash}`, branch);
+}
+
+function createGitWorktree(repo, branch, base = null) {
+  const worktree = worktreePath(repo, branch);
+  if (fs.existsSync(worktree)) {
+    fail(`Worktree destination already exists: ${worktree}`);
+  }
+
+  fs.mkdirSync(path.dirname(worktree), { recursive: true, mode: 0o700 });
+  console.log('→ Git worktree');
+  const args = ['worktree', 'add'];
+  if (base) args.push('--no-track', '-b', branch, worktree, base);
+  else args.push(worktree, branch);
+  run('git', args, { cwd: repo, inherit: true });
+  return worktree;
+}
+
 function chooseColor(registry) {
   const used = new Set(
     Object.values(registry.tasks)
@@ -237,42 +260,14 @@ function herdrResultIds(raw, label) {
   };
 }
 
-function herdrCreateWorktree(repo, branch, label, base) {
-  console.log('→ Herdr worktree');
-  const args = [
-    'worktree', 'create',
-    '--cwd', repo,
-    '--branch', branch,
-    '--label', label,
-    '--focus',
-  ];
-  if (base) args.splice(6, 0, '--base', base);
-  return herdrResultIds(output('herdr', args), 'herdr worktree create');
-}
-
-function herdrOpenWorktree(repo, worktree, label) {
-  console.log('→ Open existing worktree in Herdr');
+function herdrCreateWorkspace(worktree, label) {
+  console.log('→ Herdr workspace');
   const ids = herdrResultIds(output('herdr', [
-    'worktree', 'open',
-    '--cwd', repo,
-    '--path', worktree,
+    'workspace', 'create',
+    '--cwd', worktree,
     '--label', label,
     '--focus',
-  ]), 'herdr worktree open');
-
-  if (ids.workspaceId && (!ids.tabId || !ids.paneId)) {
-    const tabIds = herdrResultIds(output('herdr', [
-      'tab', 'create',
-      '--workspace', ids.workspaceId,
-      '--cwd', worktree,
-      '--label', 'codex',
-      '--focus',
-    ]), 'herdr tab create');
-    ids.tabId = tabIds.tabId;
-    ids.paneId = tabIds.paneId;
-  }
-
-  ids.worktree ||= worktree;
+  ]), 'herdr workspace create');
   return ids;
 }
 
@@ -404,11 +399,7 @@ function createTask(ticketInput, options = {}) {
 
   const color = chooseColor(registry);
   const label = `${ticket} · ${jira.summary}`;
-  const ids = existingWorktree
-    ? herdrOpenWorktree(repo, existingWorktree, label)
-    : herdrCreateWorktree(repo, branch, label, options.branch ? null : 'origin/master');
-  const worktree = existingWorktree || ids.worktree || findWorktree(repo, branch);
-  if (!worktree) fail(`Created ${branch}, but could not locate its worktree.`);
+  const worktree = existingWorktree || createGitWorktree(repo, branch, options.branch ? null : 'origin/master');
 
   const task = {
     ticket,
@@ -418,17 +409,25 @@ function createTask(ticketInput, options = {}) {
     worktree,
     label,
     color,
-    herdrWorkspaceId: ids.workspaceId,
-    herdrCodexTabId: ids.tabId,
-    herdrCodexPaneId: ids.paneId,
+    herdrWorkspaceId: null,
+    herdrCodexTabId: null,
+    herdrCodexPaneId: null,
+    herdrWorkspaceMode: 'standalone',
     herdrAgentName: null,
     vscodeWorkspace: path.join(VSCODE_DIR, `${ticket}.code-workspace`),
     status: 'provisioning',
     createdAt: new Date().toISOString(),
   };
 
-  // Persist immediately after Herdr creates the worktree, so later failures do
-  // not leave an unregistered branch/worktree behind.
+  // Persist before creating the Herdr workspace so a later Herdr/Codex failure
+  // cannot leave an unregistered Git worktree behind.
+  registry.tasks[ticket] = task;
+  saveRegistry(registry);
+
+  const ids = herdrCreateWorkspace(worktree, label);
+  task.herdrWorkspaceId = ids.workspaceId;
+  task.herdrCodexTabId = ids.tabId;
+  task.herdrCodexPaneId = ids.paneId;
   registry.tasks[ticket] = task;
   saveRegistry(registry);
 
@@ -451,23 +450,11 @@ function createTask(ticketInput, options = {}) {
 
 function reopenHerdr(task, jira) {
   console.log('→ Reopen Herdr workspace');
-  const raw = output('herdr', [
-    'worktree', 'open',
-    '--cwd', task.repo,
-    '--path', task.worktree,
-    '--label', task.label,
-    '--focus',
-  ]);
-  const json = parseJson(raw, 'herdr worktree open');
-  const result = json.result || json;
-  const ids = {
-    workspaceId: result.workspace?.workspace_id || result.workspace_id,
-    tabId: result.tab?.tab_id || result.tab_id,
-    paneId: result.root_pane?.pane_id || result.pane?.pane_id || result.pane_id,
-  };
+  const ids = herdrCreateWorkspace(task.worktree, task.label);
   task.herdrWorkspaceId = ids.workspaceId;
   task.herdrCodexTabId = ids.tabId;
   task.herdrCodexPaneId = ids.paneId;
+  task.herdrWorkspaceMode = 'standalone';
   applyHerdrColor(ids.workspaceId, task.color);
   task.herdrAgentName = bootstrapHerdr(task, ids, jira.description);
   task.status = 'ready';
@@ -534,6 +521,11 @@ function codeTask(options) {
   const registry = loadRegistry();
   const task = inferTask(registry, options);
   if (!task) fail('Could not infer the task. Run this inside a task worktree/Herdr workspace, or use: task code XING-123');
+
+  if (task.color && herdrWorkspaceExists(task.herdrWorkspaceId)) {
+    applyHerdrColor(task.herdrWorkspaceId, task.color);
+  }
+
   if (!task.vscodeWorkspace || !fs.existsSync(task.vscodeWorkspace)) {
     task.vscodeWorkspace = writeVsCodeWorkspace(task);
     registry.tasks[task.ticket] = task;
