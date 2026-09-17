@@ -1,0 +1,36 @@
+# Merge these sections into ~/.config/herdr/config.toml
+
+[worktrees]
+directory = "~/.herdr/worktrees"
+
+# prefix+o is Herdr's built-in notification-target shortcut. Disable that
+# default before assigning the same chord to the task workflow command.
+[keys]
+open_notification_target = ""
+
+# Show the task identity color in the Space sidebar. Only one task_* token is
+# reported per workspace, so only one stripe appears.
+[ui.sidebar.spaces]
+rows = [
+  [
+    { token = "$task_blue",   fg = "#3A7CA5", bold = true },
+    { token = "$task_purple", fg = "#7158A6", bold = true },
+    { token = "$task_teal",   fg = "#398B83", bold = true },
+    { token = "$task_orange", fg = "#B56B3D", bold = true },
+    { token = "$task_red",    fg = "#A94F5D", bold = true },
+    { token = "$task_green",  fg = "#5B8255", bold = true },
+    { token = "$task_indigo", fg = "#5569A8", bold = true },
+    { token = "$task_brown",  fg = "#8A6748", bold = true },
+    "workspace",
+  ],
+  ["state_icon", "branch", "git_status"],
+]
+
+# From the currently selected Herdr workspace, prefix+o opens/focuses its
+# matching VS Code .code-workspace. Herdr supplies HERDR_ACTIVE_WORKSPACE_ID
+# to detached shell commands, and the task CLI uses it to identify the task.
+[[keys.command]]
+key = "prefix+o"
+type = "shell"
+command = "$HOME/.local/bin/task code --herdr-workspace \"$HERDR_ACTIVE_WORKSPACE_ID\""
+description = "open task in VS Code"
