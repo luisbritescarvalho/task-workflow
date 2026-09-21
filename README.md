@@ -1,4 +1,4 @@
-# JIRA → Git worktree → Herdr → Codex → VS Code/Peacock
+# Developer task bootstrap → Git worktree → Herdr → Codex → VS Code/Peacock
 
 A tiny dependency-free Node CLI for the workflow:
 
@@ -16,6 +16,13 @@ task XING-12345
   → open VS Code automatically
 ```
 
+Tasks do not have to come from JIRA. For local work, use:
+
+```text
+task local "Investigate checkout timeout"
+  → the same Git worktree, Herdr, Codex, VS Code, and color workflow
+```
+
 ## Development
 
 The project has no package dependencies. Run its syntax check and isolated CLI
@@ -30,15 +37,16 @@ stubs. They do not create real branches, worktrees, workspaces, or JIRA changes.
 
 ## 1. Prerequisites
 
-Required commands:
+Required for all tasks:
 
 - `git`
 - `node`
 - `herdr`
 - `codex`
 - `code` (VS Code shell command)
-- `acli` (Atlassian CLI)
 - Peacock installed in VS Code
+
+JIRA-backed tasks additionally require `acli` (Atlassian CLI).
 
 Install ACLI on macOS:
 
@@ -49,10 +57,11 @@ acli jira auth login --web
 acli jira auth status
 ```
 
-The CLI checks JIRA authentication before fetching Git refs or creating a
-worktree. If OAuth has expired, task creation stops and asks you to run the
-login command again. A Codex/ChatGPT Atlassian connector login is separate
-from the local `acli` login.
+JIRA task creation checks authentication before fetching Git refs or creating a
+worktree. If OAuth has expired, JIRA task creation stops and asks you to run
+the login command again. Local tasks do not use JIRA or `acli`. A
+Codex/ChatGPT Atlassian connector login is separate from the local `acli`
+login.
 
 If `code` is not on PATH, in VS Code run **Shell Command: Install 'code' command in PATH** from the Command Palette.
 
@@ -126,7 +135,28 @@ Later:
 ```bash
 task open XING-12345
 task list
+task jira XING-12345
+task figma XING-12345
 ```
+
+When run inside a registered JIRA task worktree, the ticket argument can be
+omitted. `task jira` opens the ticket URL and `task figma` finds the first Figma
+URL in the ticket description. Both reuse a Brave window named after the ticket,
+focus the matching tab, and add new URLs as tabs. If Brave automation is
+unavailable, the CLI falls back to opening the URL with macOS `open` in the
+default browser.
+
+For work without a JIRA ticket:
+
+```bash
+task local "Investigate checkout timeout"
+task local --branch chore/checkout-timeout "Investigate checkout timeout"
+```
+
+No-ticket tasks use an ID such as `NO-TICKET-INVESTIGATE-CHECKOUT-TIMEOUT`, skip JIRA
+authentication and lookup, and otherwise use the same workflow. When no branch
+is supplied, the branch is created from the latest `origin/master` as
+`local-investigate-checkout-timeout`.
 
 To register an existing local branch:
 
@@ -161,6 +191,18 @@ Ctrl+B, O
 The binding passes Herdr's explicit active workspace ID, so it does not depend
 on the detached command's working directory.
 
+To remove a task's local Herdr workspace, Git worktree, VS Code workspace file,
+and registry entry, preview the cleanup first:
+
+```bash
+task delete TASK-ID
+task delete TASK-ID --yes
+```
+
+Deletion refuses dirty worktrees, branches with unpushed commits, and the
+repository's primary checkout. The Git branch itself is preserved, so it can
+be adopted again later with `--branch`.
+
 ## State
 
 The persistent registry and generated VS Code workspaces live under:
@@ -180,6 +222,7 @@ Set `TASK_WORKFLOW_HOME` if you want these elsewhere.
 - The command must be started from inside the source Git repository when creating a new task.
 - Base is hard-coded to `origin/master` as requested.
 - `--branch` accepts an existing local branch and preserves its current history.
+- `task local` creates the same task environment without requiring a JIRA ticket.
 - A registered task keeps its assigned color.
 - New tasks prefer palette colors not currently used by registered worktrees
   that still exist.
@@ -187,4 +230,5 @@ Set `TASK_WORKFLOW_HOME` if you want these elsewhere.
   in `tasks.json`; a missing Herdr workspace causes the description to be
   fetched again.
 - If Herdr's server/session loses the workspace but the Git worktree still exists, `task open XING-12345` reopens it and bootstraps fresh `codex` and `terminal` tabs.
-- Cleanup (`task done`) is intentionally not included yet; it's safer to add after the create/open flow has been used for a few real tasks.
+- Deletion is intentionally conservative: it requires `--yes`, refuses dirty
+  or unpushed work, and preserves the Git branch.

@@ -36,7 +36,16 @@ if (command === 'acli') {
       key: 'XING-123',
       fields: {
         summary: 'Improve recommendation tracking',
-        description: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Track all clicks.' }] }] },
+        description: {
+          type: 'doc',
+          content: [{
+            type: 'paragraph',
+            content: [
+              { type: 'text', text: 'Track all clicks.' },
+              { type: 'inlineCard', attrs: { url: 'https://www.figma.com/file/example/recommendation-tracking' } },
+            ],
+          }],
+        },
       },
     }));
     process.exit(0);
@@ -45,7 +54,10 @@ if (command === 'acli') {
 
 if (command === 'git') {
   if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') console.log(process.env.FAKE_REPO);
+  else if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') console.log('origin/' + args[2].split('@')[0]);
   else if (args[0] === 'rev-parse' && args[1] === '--verify') console.log('0123456789abcdef');
+  else if (args[0] === 'rev-list' && args[1] === '--left-right') console.log('0\t0');
+  else if (args[0] === 'rev-list' && args[1] === '--count') console.log('0');
   else if (args[0] === 'check-ref-format') process.exit(0);
   else if (args[0] === 'show-ref') process.exit(process.env.FAKE_BRANCH_EXISTS === 'yes' ? 0 : 1);
   else if (args[0] === 'worktree' && args[1] === 'list') {
@@ -60,6 +72,7 @@ if (command === 'git') {
     const worktree = branchIndex === -1 ? args[2] : args[branchIndex + 2];
     fs.mkdirSync(worktree, { recursive: true });
   }
+  else if (args[0] === 'worktree' && args[1] === 'remove') fs.rmSync(args[2], { recursive: true, force: true });
   process.exit(0);
 }
 
@@ -68,6 +81,7 @@ if (command === 'herdr') {
   if (args[0] === 'workspace' && args[1] === 'get') {
     process.exit(process.env.FAKE_WORKSPACE_EXISTS === 'yes' ? 0 : 1);
   }
+  if (args[0] === 'workspace' && args[1] === 'close') process.exit(0);
   if (args[0] === 'workspace' && args[1] === 'create') {
     console.log(JSON.stringify({ result: {
       workspace: { workspace_id: 'wT' },
@@ -85,11 +99,11 @@ if (command === 'herdr') {
   process.exit(0);
 }
 
-if (command === 'code' || command === 'codex') process.exit(0);
+if (command === 'code' || command === 'codex' || command === 'open' || command === 'osascript') process.exit(0);
 process.exit(2);
 `);
 
-  for (const command of ['git', 'herdr', 'acli', 'code', 'codex']) {
+  for (const command of ['git', 'herdr', 'acli', 'code', 'codex', 'open', 'osascript']) {
     const wrapper = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(stub)} ${shellQuote(command)} "$@"\n`;
     const file = path.join(bin, command);
     fs.writeFileSync(file, wrapper, { mode: 0o755 });
@@ -155,6 +169,32 @@ test('creates a registered task from JIRA and origin/master', () => {
   assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
   const prompt = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'agent prompt');
   assert.match(prompt.args[3], /Track all clicks\./);
+});
+
+test('opens JIRA and Figma links in a ticket-named Brave window', () => {
+  const fixture = makeFixture();
+  const jira = spawnSync(process.execPath, [cli, 'jira', 'XING-123'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(jira.status, 0, jira.stderr);
+
+  const figma = spawnSync(process.execPath, [cli, 'figma', 'XING-123'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(figma.status, 0, figma.stderr);
+
+  const browserCalls = calls(fixture).filter(({ command }) => command === 'osascript');
+  assert.equal(browserCalls.length, 2);
+  assert.equal(browserCalls[0].args[2], '--');
+  assert.equal(browserCalls[0].args[3], 'XING-123');
+  assert.equal(browserCalls[0].args[4], 'https://new-work.atlassian.net/browse/XING-123');
+  assert.equal(browserCalls[1].args[2], '--');
+  assert.equal(browserCalls[1].args[3], 'XING-123');
+  assert.equal(browserCalls[1].args[4], 'https://www.figma.com/file/example/recommendation-tracking');
 });
 
 test('authentication failure aborts before Git fetch or Herdr mutation', () => {
@@ -299,4 +339,88 @@ test('task code resolves an explicit Herdr workspace ID and reapplies its color'
   ]);
   const codeCall = recorded.find(({ command }) => command === 'code');
   assert.deepEqual(codeCall.args, [vscodeWorkspace]);
+});
+
+test('creates a local task without JIRA and uses origin/master', () => {
+  const fixture = makeFixture();
+  const result = spawnSync(process.execPath, [cli, 'local', 'Investigate', 'checkout', 'timeout'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const registry = JSON.parse(fs.readFileSync(path.join(fixture.state, 'tasks.json'), 'utf8'));
+  const task = registry.tasks['NO-TICKET-INVESTIGATE-CHECKOUT-TIMEOUT'];
+  assert.equal(task.kind, 'local');
+  assert.equal(task.ticket, null);
+  assert.equal(task.title, 'Investigate checkout timeout');
+  assert.equal(task.branch, 'local-investigate-checkout-timeout');
+
+  const recorded = calls(fixture);
+  assert.equal(recorded.some(({ command }) => command === 'acli'), false);
+  const fetch = recorded.find(({ command, args }) => command === 'git' && args[0] === 'fetch');
+  assert.ok(fetch);
+  const worktree = recorded.find(({ command, args }) => command === 'git' && args.slice(0, 2).join(' ') === 'worktree add');
+  assert.deepEqual(worktree.args.slice(-2), [task.worktree, 'origin/master']);
+  const prompt = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'agent prompt');
+  assert.match(prompt.args[3], /local development task/);
+});
+
+test('adopts an existing local branch and worktree without JIRA', () => {
+  const fixture = makeFixture({ branchExists: true, checkedOut: true });
+  const result = spawnSync(process.execPath, [cli, 'local', '--branch', 'already-started', 'Fix checkout'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const registry = JSON.parse(fs.readFileSync(path.join(fixture.state, 'tasks.json'), 'utf8'));
+  const task = registry.tasks['NO-TICKET-FIX-CHECKOUT'];
+  assert.equal(task.branch, 'already-started');
+  assert.equal(task.worktree, fixture.env.FAKE_EXISTING_WORKTREE);
+
+  const recorded = calls(fixture);
+  assert.equal(recorded.some(({ command }) => command === 'acli'), false);
+  assert.equal(recorded.some(({ command, args }) => command === 'git' && args[0] === 'fetch'), false);
+  assert.equal(recorded.some(({ command, args }) => command === 'git' && args.slice(0, 2).join(' ') === 'worktree add'), false);
+  const workspace = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'workspace create');
+  assert.equal(workspace.args[workspace.args.indexOf('--cwd') + 1], fixture.env.FAKE_EXISTING_WORKTREE);
+});
+
+test('previews and safely deletes a clean task while preserving its branch', () => {
+  const fixture = makeFixture();
+  const created = spawnSync(process.execPath, [cli, 'XING-123'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(created.status, 0, created.stderr);
+
+  const registryFile = path.join(fixture.state, 'tasks.json');
+  const task = JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['XING-123'];
+  const preview = spawnSync(process.execPath, [cli, 'delete', 'XING-123'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /Nothing was removed/);
+  assert.ok(fs.existsSync(task.worktree));
+  assert.ok(fs.existsSync(task.vscodeWorkspace));
+
+  const deleted = spawnSync(process.execPath, [cli, 'delete', 'XING-123', '--yes'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(deleted.status, 0, deleted.stderr);
+  assert.equal(fs.existsSync(task.worktree), false);
+  assert.equal(fs.existsSync(task.vscodeWorkspace), false);
+  assert.equal(JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['XING-123'], undefined);
+
+  const recorded = calls(fixture);
+  assert.ok(recorded.some(({ command, args }) => command === 'herdr' && args.join(' ') === 'workspace close wT'));
+  assert.ok(recorded.some(({ command, args }) => command === 'git' && args.join(' ') === `worktree remove ${task.worktree}`));
 });
