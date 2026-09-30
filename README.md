@@ -1,12 +1,12 @@
 # Developer task bootstrap → Git worktree → Herdr → Codex → VS Code/Peacock
 
-A tiny dependency-free Node CLI for the workflow:
+A tiny Node CLI plus a small GitHub checks watcher for the workflow:
 
 ```text
 task XING-12345
   → read JIRA title + description
-  → git fetch origin master
-  → branch from latest origin/master
+  → git fetch origin master (or origin main)
+  → branch from the latest available origin/master or origin/main
   → Git worktree + independent Herdr workspace
   → Herdr tabs: codex + terminal
   → start Codex and send JIRA context
@@ -46,6 +46,9 @@ Required for all tasks:
 - `code` (VS Code shell command)
 - Peacock installed in VS Code
 
+`task checks` additionally uses the GitHub CLI (`gh`) and the companion
+`watch-pr-checks` script. `jq` improves failure summaries and is optional.
+
 JIRA-backed tasks additionally require `acli` (Atlassian CLI).
 
 Install ACLI on macOS:
@@ -72,7 +75,9 @@ Pick a directory already on your PATH. For example:
 ```bash
 mkdir -p ~/.local/bin
 cp task.mjs ~/.local/bin/task
+cp watch-pr-checks ~/.local/bin/watch-pr-checks
 chmod +x ~/.local/bin/task
+chmod +x ~/.local/bin/watch-pr-checks
 ```
 
 If needed, add this to `~/.zshrc`:
@@ -128,7 +133,8 @@ The branch will look like:
 XING-12345-jira-ticket-summary
 ```
 
-and is always created from the freshly fetched `origin/master`.
+and is always created from the freshly fetched `origin/master`, falling back to
+`origin/main` when the repository has no master branch.
 
 Later:
 
@@ -137,6 +143,10 @@ task open XING-12345
 task list
 task jira XING-12345
 task figma XING-12345
+task checks XING-12345
+task checks XING-12345 --retry-once
+task checks 12345
+task watch
 ```
 
 When run inside a registered JIRA task worktree, the ticket argument can be
@@ -145,6 +155,18 @@ URL in the ticket description. Both reuse a Brave window named after the ticket,
 focus the matching tab, and add new URLs as tabs. If Brave automation is
 unavailable, the CLI falls back to opening the URL with macOS `open` in the
 default browser.
+
+`task checks` watches the pull request checks and, when the PR is in GitHub's
+merge queue, follows its temporary merge-group workflow runs too. It sends a
+macOS notification when checks pass or fail. The target can be a
+registered task ID, a PR number/URL, or a branch; a PR number/URL works even
+without a JIRA task. When omitted it is inferred
+from the current task worktree. `--retry-once` reruns failed GitHub Actions
+jobs only when the run is a `merge_group` or
+an infrastructure-like `workflow_dispatch` run (Docker/container/runner/cache/
+setup/queue), then watches the result once more. Deterministic test failures
+and external checks are reported without an automatic retry. `task
+watch` is an alias.
 
 For work without a JIRA ticket:
 
@@ -155,8 +177,9 @@ task local --branch chore/checkout-timeout "Investigate checkout timeout"
 
 No-ticket tasks use an ID such as `NO-TICKET-INVESTIGATE-CHECKOUT-TIMEOUT`, skip JIRA
 authentication and lookup, and otherwise use the same workflow. When no branch
-is supplied, the branch is created from the latest `origin/master` as
-`local-investigate-checkout-timeout`.
+is supplied, the branch is created from the latest `origin/master` (or
+`origin/main` when master is unavailable) as
+`investigate-checkout-timeout`.
 
 To register an existing local branch:
 
@@ -166,7 +189,7 @@ task XING-12345 --branch existing-branch-name
 
 If that branch is already checked out in a Git worktree, the CLI adopts it.
 Otherwise, Git creates a worktree for the existing branch. This mode never
-fetches, resets, rebases, or recreates the branch; the `origin/master` base
+fetches, resets, rebases, or recreates the branch; the default origin base
 applies only when the CLI creates a new branch. The command refuses branches
 or worktrees already registered to another task.
 
@@ -197,11 +220,15 @@ and registry entry, preview the cleanup first:
 ```bash
 task delete TASK-ID
 task delete TASK-ID --yes
+# Only when Git cannot verify push status; the branch is still preserved.
+task delete TASK-ID --yes --force
 ```
 
 Deletion refuses dirty worktrees, branches with unpushed commits, and the
-repository's primary checkout. The Git branch itself is preserved, so it can
-be adopted again later with `--branch`.
+repository's primary checkout. `--force` explicitly skips the pushed-commit
+verification. If the worktree's Git metadata is stale or missing, it can also
+remove that managed worktree path directly. The Git branch itself is preserved,
+so it can be adopted again later with `--branch`.
 
 ## State
 
@@ -220,7 +247,8 @@ Set `TASK_WORKFLOW_HOME` if you want these elsewhere.
 ## Current v1 behavior / intentional limitations
 
 - The command must be started from inside the source Git repository when creating a new task.
-- Base is hard-coded to `origin/master` as requested.
+- Base prefers `origin/master` and falls back to `origin/main` when master is
+  unavailable.
 - `--branch` accepts an existing local branch and preserves its current history.
 - `task local` creates the same task environment without requiring a JIRA ticket.
 - A registered task keeps its assigned color.

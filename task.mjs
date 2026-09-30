@@ -313,10 +313,15 @@ function currentRepo() {
   return root;
 }
 
-function fetchMaster(repo) {
-  console.log('→ Fetch origin/master');
-  run('git', ['fetch', 'origin', 'master'], { cwd: repo, inherit: true });
-  run('git', ['rev-parse', '--verify', 'origin/master'], { cwd: repo });
+function fetchBase(repo) {
+  for (const branch of ['master', 'main']) {
+    console.log(`→ Fetch origin/${branch}`);
+    const fetched = run('git', ['fetch', 'origin', branch], { cwd: repo, inherit: true, allowFailure: true });
+    if (fetched.status !== 0) continue;
+    const verified = run('git', ['rev-parse', '--verify', `origin/${branch}`], { cwd: repo, allowFailure: true });
+    if (verified.status === 0) return `origin/${branch}`;
+  }
+  fail('Could not fetch a base branch: tried origin/master and origin/main.');
 }
 
 function localBranchExists(repo, branch) {
@@ -579,6 +584,7 @@ function createTask(ticketInput, options = {}) {
 
   let branch;
   let existingWorktree = null;
+  let base = null;
   if (options.branch) {
     validateBranchName(repo, options.branch);
     if (!localBranchExists(repo, options.branch)) {
@@ -587,7 +593,7 @@ function createTask(ticketInput, options = {}) {
     branch = options.branch;
     existingWorktree = findWorktree(repo, branch);
   } else {
-    fetchMaster(repo);
+    base = fetchBase(repo);
     const slug = slugify(jira.summary) || 'task';
     branch = `${ticket}-${slug}`;
     if (localBranchExists(repo, branch)) {
@@ -604,7 +610,7 @@ function createTask(ticketInput, options = {}) {
     repo,
     branch,
     existingWorktree,
-    base: options.branch ? null : 'origin/master',
+    base,
   });
 }
 
@@ -628,6 +634,7 @@ function createLocalTask(options) {
 
   let branch;
   let existingWorktree = null;
+  let base = null;
   if (options.branch) {
     validateBranchName(repo, options.branch);
     if (!localBranchExists(repo, options.branch)) {
@@ -636,9 +643,9 @@ function createLocalTask(options) {
     branch = options.branch;
     existingWorktree = findWorktree(repo, branch);
   } else {
-    fetchMaster(repo);
+    base = fetchBase(repo);
     const slug = slugify(title) || 'task';
-    branch = `local-${slug}`;
+    branch = slug;
     if (localBranchExists(repo, branch)) {
       fail(`Local branch ${branch} already exists but is not registered. Use: task local --branch ${branch}`);
     }
@@ -651,7 +658,7 @@ function createLocalTask(options) {
     repo,
     branch,
     existingWorktree,
-    base: options.branch ? null : 'origin/master',
+    base,
   });
 }
 
@@ -724,26 +731,51 @@ function deleteTask(taskInput, options = {}) {
   if (repo === worktree) {
     fail(`Refusing to remove ${id}: its worktree is the repository's primary checkout.`);
   }
-  if (!fs.existsSync(worktree)) fail(`Worktree does not exist: ${task.worktree}`);
-
-  const status = run('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: worktree, allowFailure: true });
-  if (status.status !== 0) fail(`Could not inspect worktree status for ${id}.`);
-  if ((status.stdout || '').trim()) {
-    fail(`Refusing to remove ${id}: the worktree has uncommitted or untracked changes.`);
+  const allowedWorktreeRoots = [
+    path.resolve(WORKTREE_DIR),
+    path.join(HOME, '.herdr', 'worktrees'),
+  ];
+  const safeWorktreePath = allowedWorktreeRoots.some((root) => worktree.startsWith(`${root}${path.sep}`));
+  if (!safeWorktreePath) {
+    fail(`Refusing to remove ${id}: its worktree is outside the managed task-workflow/Herdr roots.`);
   }
 
-  const upstream = run('git', ['rev-parse', '--abbrev-ref', `${task.branch}@{upstream}`], { cwd: repo, allowFailure: true });
-  if (upstream.status === 0 && (upstream.stdout || '').trim()) {
-    const counts = output('git', ['rev-list', '--left-right', '--count', `${upstream.stdout.trim()}...${task.branch}`], { cwd: repo, allowFailure: true });
-    const [behind, ahead] = counts.split(/\s+/).map(Number);
-    if (!Number.isFinite(ahead)) fail(`Could not inspect whether ${id} has unpushed commits.`);
-    if (ahead > 0) fail(`Refusing to remove ${id}: ${ahead} commit(s) are not pushed to ${upstream.stdout.trim()}.`);
-    void behind;
+  const worktreeExists = fs.existsSync(worktree);
+  if (!worktreeExists && !options.force) fail(`Worktree does not exist: ${task.worktree}`);
+  if (!worktreeExists && options.force) {
+    console.warn(`⚠ Worktree is already missing; --force will remove only its task metadata.`);
+  }
+
+  if (worktreeExists) {
+    const status = run('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: worktree, allowFailure: true });
+    if (status.status !== 0) {
+      if (!options.force) fail(`Could not inspect worktree status for ${id}.`);
+      console.warn(`⚠ Could not inspect worktree status; --force will remove the managed path if confirmed.`);
+    } else if ((status.stdout || '').trim()) {
+      fail(`Refusing to remove ${id}: the worktree has uncommitted or untracked changes.`);
+    }
+  }
+
+  if (options.force) {
+    console.warn(`⚠ Skipping the pushed-commit check for ${id} (--force); the Git branch will be preserved.`);
   } else {
-    const ahead = output('git', ['rev-list', '--count', `origin/master..${task.branch}`], { cwd: repo, allowFailure: true });
-    if (!/^\d+$/.test(ahead)) fail(`Could not determine whether ${id} has unpushed commits; no branch upstream is configured.`);
-    if (Number(ahead) > 0) {
-      fail(`Refusing to remove ${id}: its branch has commits but no upstream branch is configured.`);
+    const upstream = run('git', ['rev-parse', '--abbrev-ref', `${task.branch}@{upstream}`], { cwd: repo, allowFailure: true });
+    if (upstream.status === 0 && (upstream.stdout || '').trim()) {
+      const counts = output('git', ['rev-list', '--left-right', '--count', `${upstream.stdout.trim()}...${task.branch}`], { cwd: repo, allowFailure: true });
+      const [behind, ahead] = counts.split(/\s+/).map(Number);
+      if (!Number.isFinite(ahead)) fail(`Could not inspect whether ${id} has unpushed commits.`);
+      if (ahead > 0) fail(`Refusing to remove ${id}: ${ahead} commit(s) are not pushed to ${upstream.stdout.trim()}.`);
+      void behind;
+    } else {
+      const base = ['origin/master', 'origin/main'].find((ref) => (
+        run('git', ['rev-parse', '--verify', ref], { cwd: repo, allowFailure: true }).status === 0
+      ));
+      if (!base) fail(`Could not determine whether ${id} has unpushed commits; neither origin/master nor origin/main is available.`);
+      const ahead = output('git', ['rev-list', '--count', `${base}..${task.branch}`], { cwd: repo, allowFailure: true });
+      if (!/^\d+$/.test(ahead)) fail(`Could not determine whether ${id} has unpushed commits; no branch upstream is configured.`);
+      if (Number(ahead) > 0) {
+        fail(`Refusing to remove ${id}: its branch has commits but no upstream branch is configured.`);
+      }
     }
   }
 
@@ -759,18 +791,39 @@ function deleteTask(taskInput, options = {}) {
   console.log(`  VS Code file:    ${task.vscodeWorkspace || '(none)'}`);
   console.log(`  Git branch:      ${task.branch} (preserved)`);
   if (!options.confirm) {
-    console.log(`\nNothing was removed. Re-run with: task delete ${id} --yes`);
+    const force = options.force ? ' --force' : '';
+    console.log(`\nNothing was removed. Re-run with: task delete ${id} --yes${force}`);
     return;
   }
 
   if (task.herdrWorkspaceId && herdrWorkspaceExists(task.herdrWorkspaceId)) {
-    run('herdr', ['workspace', 'close', task.herdrWorkspaceId]);
+    run('herdr', ['workspace', 'close', task.herdrWorkspaceId], { allowFailure: options.force });
   }
-  run('git', ['worktree', 'remove', task.worktree], { cwd: repo, inherit: true });
+  if (worktreeExists) {
+    const removed = run('git', ['worktree', 'remove', task.worktree], {
+      cwd: repo,
+      inherit: true,
+      allowFailure: options.force,
+    });
+    if (removed.status !== 0 && options.force) {
+      console.warn(`⚠ Git could not remove the stale worktree metadata; removing the managed path directly.`);
+      fs.rmSync(worktree, { recursive: true, force: true });
+      run('git', ['worktree', 'prune'], { cwd: repo, allowFailure: true });
+    }
+  }
   if (vscodeWorkspace && fs.existsSync(vscodeWorkspace)) fs.unlinkSync(vscodeWorkspace);
   delete registry.tasks[id];
   saveRegistry(registry);
   console.log(`✓ Deleted ${id}; branch ${task.branch} was preserved.`);
+}
+
+function normalizedPath(value) {
+  const resolved = path.resolve(value);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 function inferTask(registry, { ticket, workspaceId }) {
@@ -782,9 +835,12 @@ function inferTask(registry, { ticket, workspaceId }) {
     if (match) return match;
   }
 
-  const cwd = path.resolve(process.cwd());
+  const cwd = normalizedPath(process.cwd());
   const matches = Object.values(registry.tasks)
-    .filter((task) => cwd === task.worktree || cwd.startsWith(`${task.worktree}${path.sep}`))
+    .filter((task) => {
+      const worktree = normalizedPath(task.worktree);
+      return cwd === worktree || cwd.startsWith(`${worktree}${path.sep}`);
+    })
     .sort((a, b) => b.worktree.length - a.worktree.length);
   return matches[0];
 }
@@ -804,6 +860,50 @@ function codeTask(options) {
     saveRegistry(registry);
   }
   openVsCode(task.vscodeWorkspace);
+}
+
+function githubRepository(repo) {
+  const remote = output('git', ['remote', 'get-url', 'origin'], { cwd: repo, allowFailure: true });
+  const match = remote.match(/github\.com[:/]([^/]+)\/([^/#]+?)(?:\.git)?$/i);
+  if (!match) {
+    fail(`Could not determine the GitHub repository from origin: ${remote || '(missing)'}`);
+  }
+  return `${match[1]}/${match[2]}`;
+}
+
+function parseChecksArgs(args) {
+  const options = { target: null, retryOnce: false };
+  for (const value of args) {
+    if (value === '--retry-once') options.retryOnce = true;
+    else if (value.startsWith('-')) fail('Usage: task checks [TASK-ID|PR|BRANCH] [--retry-once]');
+    else if (!options.target) options.target = value;
+    else fail('Usage: task checks [TASK-ID|PR|BRANCH] [--retry-once]');
+  }
+  return options;
+}
+
+function checksTask(options) {
+  if (!commandExists('watch-pr-checks')) {
+    fail('Missing command: watch-pr-checks. Install it from the task-workflow repository before running task checks.');
+  }
+
+  const registry = loadRegistry();
+  const task = options.target
+    ? registry.tasks[options.target.toUpperCase()] || null
+    : inferTask(registry, { ticket: null, workspaceId: null });
+  const target = task ? task.branch : options.target;
+  if (!target) fail('Could not infer the task. Run this inside a task worktree, or use: task checks TASK-ID');
+
+  const repo = githubRepository(task?.repo || currentRepo());
+  const watcherArgs = [target, repo];
+  if (options.retryOnce) watcherArgs.push('--retry-once');
+  console.log(`→ Watch PR checks for ${target}`);
+  const result = run('watch-pr-checks', watcherArgs, {
+    cwd: task?.worktree || process.cwd(),
+    inherit: true,
+    allowFailure: true,
+  });
+  process.exitCode = result.status ?? 1;
 }
 
 function parseCodeArgs(args) {
@@ -857,13 +957,14 @@ function parseLocalArgs(args) {
 }
 
 function parseDeleteArgs(args) {
-  const options = { confirm: false, id: null };
+  const options = { confirm: false, force: false, id: null };
   for (const value of args) {
     if (value === '--yes') options.confirm = true;
+    else if (value === '--force') options.force = true;
     else if (!options.id) options.id = value;
-    else fail('Usage: task delete TASK-ID [--yes]');
+    else fail('Usage: task delete TASK-ID [--yes] [--force]');
   }
-  if (!options.id) fail('Usage: task delete TASK-ID [--yes]');
+  if (!options.id) fail('Usage: task delete TASK-ID [--yes] [--force]');
   return options;
 }
 
@@ -904,6 +1005,9 @@ function doctor() {
     console.log('○ acli (optional for local tasks)');
   }
 
+  console.log(`${commandExists('watch-pr-checks') ? '✓' : '○'} watch-pr-checks (optional for task checks)`);
+  console.log(`${commandExists('gh') ? '✓' : '○'} gh (optional for task checks)`);
+
   if (commandExists('herdr')) {
     const config = run('herdr', ['config', 'check'], { allowFailure: true });
     const configOk = config.status === 0;
@@ -938,7 +1042,8 @@ function doctor() {
 }
 
 function help() {
-  console.log(`task-workflow\n\nUsage:\n  task XING-12345        Create a JIRA task from the current repo, or open it\n  task XING-12345 --branch EXISTING-BRANCH\n                         Adopt an existing JIRA task branch/worktree\n  task local "TITLE"     Create or open a task without a JIRA ticket\n  task local --branch BRANCH ["TITLE"]\n                         Adopt an existing local branch/worktree\n  task open TASK-ID      Reopen/focus Herdr + VS Code\n  task code [TASK-ID]    Open/focus the task's VS Code workspace\n  task code --herdr-workspace ID\n                         Open/focus VS Code for a Herdr workspace\n  task jira [JIRA-ID]    Open the JIRA ticket in the default browser\n  task figma [JIRA-ID]   Open the first Figma link found on the ticket\n  task list              List registered tasks\n  task doctor            Check commands, authentication, Herdr, and Peacock\n  task delete TASK-ID    Preview safe local cleanup (use --yes to apply)\n\nEnvironment:\n  TASK_WORKFLOW_HOME     Override state directory (default: ~/.local/share/task-workflow)`);
+  console.log('  task delete TASK-ID --yes --force  Force cleanup when Git push status cannot be verified');
+  console.log(`task-workflow\n\nUsage:\n  task XING-12345        Create a JIRA task from the current repo, or open it\n  task XING-12345 --branch EXISTING-BRANCH\n                         Adopt an existing JIRA task branch/worktree\n  task local "TITLE"     Create or open a task without a JIRA ticket\n  task local --branch BRANCH ["TITLE"]\n                         Adopt an existing local branch/worktree\n  task open TASK-ID      Reopen/focus Herdr + VS Code\n  task code [TASK-ID]    Open/focus the task's VS Code workspace\n  task code --herdr-workspace ID\n                         Open/focus VS Code for a Herdr workspace\n  task checks [TASK-ID|PR|BRANCH]\n                         Watch PR checks and notify on failures\n  task checks ... --retry-once\n                         Rerun failed GitHub Actions once when eligible\n  task watch [TASK-ID|PR|BRANCH]\n                         Alias for task checks\n  task jira [JIRA-ID]    Open the JIRA ticket in the default browser\n  task figma [JIRA-ID]   Open the first Figma link found on the ticket\n  task list              List registered tasks\n  task doctor            Check commands, authentication, Herdr, and Peacock\n  task delete TASK-ID    Preview safe local cleanup (use --yes to apply)\n\nEnvironment:\n  TASK_WORKFLOW_HOME     Override state directory (default: ~/.local/share/task-workflow)`);
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -962,6 +1067,8 @@ if (!command || command === '--help' || command === '-h' || command === 'help') 
   openFigma(parseBrowserArgs(args, command));
 } else if (command === 'code') {
   codeTask(parseCodeArgs(args));
+} else if (command === 'checks' || command === 'watch') {
+  checksTask(parseChecksArgs(args));
 } else if (command === 'list') {
   listTasks();
 } else if (command === 'doctor') {

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check task.mjs && node --test test.mjs",
+    "check": "node --check task.mjs && bash -n watch-pr-checks && node --test test.mjs",
     "test": "node --test test.mjs"
   },
   "engines": {

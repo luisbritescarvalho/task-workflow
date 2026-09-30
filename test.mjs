@@ -11,7 +11,7 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
-function makeFixture({ authenticated = true, branchExists = false, checkedOut = false } = {}) {
+function makeFixture({ authenticated = true, branchExists = false, checkedOut = false, defaultBranch = 'master', unpushable = false, invalidWorktree = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-workflow-test-'));
   const bin = path.join(root, 'bin');
   const repo = path.join(root, 'repo');
@@ -54,10 +54,23 @@ if (command === 'acli') {
 
 if (command === 'git') {
   if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') console.log(process.env.FAKE_REPO);
-  else if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') console.log('origin/' + args[2].split('@')[0]);
-  else if (args[0] === 'rev-parse' && args[1] === '--verify') console.log('0123456789abcdef');
+  else if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') {
+    if (args[2].includes('@{upstream}') && process.env.FAKE_UNPUSHABLE === 'yes') process.exit(1);
+    console.log('origin/' + args[2].split('@')[0]);
+  }
+  else if (args[0] === 'remote' && args[1] === 'get-url' && args[2] === 'origin') console.log('git@github.com:xing-com/crate.git');
+  else if (args[0] === 'fetch') {
+    if (args[2] === 'master' && process.env.FAKE_DEFAULT_BRANCH === 'main') process.exit(1);
+  }
+  else if (args[0] === 'rev-parse' && args[1] === '--verify') {
+    if (args[2] === 'origin/master' && process.env.FAKE_DEFAULT_BRANCH === 'main') process.exit(1);
+    console.log('0123456789abcdef');
+  }
   else if (args[0] === 'rev-list' && args[1] === '--left-right') console.log('0\t0');
-  else if (args[0] === 'rev-list' && args[1] === '--count') console.log('0');
+  else if (args[0] === 'rev-list' && args[1] === '--count') {
+    if (process.env.FAKE_UNPUSHABLE === 'yes') process.exit(1);
+    console.log('0');
+  }
   else if (args[0] === 'check-ref-format') process.exit(0);
   else if (args[0] === 'show-ref') process.exit(process.env.FAKE_BRANCH_EXISTS === 'yes' ? 0 : 1);
   else if (args[0] === 'worktree' && args[1] === 'list') {
@@ -72,7 +85,11 @@ if (command === 'git') {
     const worktree = branchIndex === -1 ? args[2] : args[branchIndex + 2];
     fs.mkdirSync(worktree, { recursive: true });
   }
-  else if (args[0] === 'worktree' && args[1] === 'remove') fs.rmSync(args[2], { recursive: true, force: true });
+  else if (args[0] === 'status' && process.env.FAKE_INVALID_WORKTREE === 'yes') process.exit(1);
+  else if (args[0] === 'worktree' && args[1] === 'remove') {
+    if (process.env.FAKE_INVALID_WORKTREE === 'yes') process.exit(1);
+    fs.rmSync(args[2], { recursive: true, force: true });
+  }
   process.exit(0);
 }
 
@@ -99,11 +116,11 @@ if (command === 'herdr') {
   process.exit(0);
 }
 
-if (command === 'code' || command === 'codex' || command === 'open' || command === 'osascript') process.exit(0);
+if (command === 'code' || command === 'codex' || command === 'open' || command === 'osascript' || command === 'watch-pr-checks') process.exit(0);
 process.exit(2);
 `);
 
-  for (const command of ['git', 'herdr', 'acli', 'code', 'codex', 'open', 'osascript']) {
+  for (const command of ['git', 'herdr', 'acli', 'code', 'codex', 'open', 'osascript', 'watch-pr-checks']) {
     const wrapper = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(stub)} ${shellQuote(command)} "$@"\n`;
     const file = path.join(bin, command);
     fs.writeFileSync(file, wrapper, { mode: 0o755 });
@@ -118,6 +135,9 @@ process.exit(2);
     FAKE_REPO: repo,
     FAKE_ROOT: root,
     FAKE_BRANCH_EXISTS: branchExists ? 'yes' : 'no',
+    FAKE_DEFAULT_BRANCH: defaultBranch,
+    FAKE_UNPUSHABLE: unpushable ? 'yes' : 'no',
+    FAKE_INVALID_WORKTREE: invalidWorktree ? 'yes' : 'no',
     FAKE_CHECKED_OUT: checkedOut ? 'yes' : 'no',
     FAKE_WORKSPACE_EXISTS: 'yes',
     FAKE_EXISTING_WORKTREE: path.join(root, 'existing-worktree'),
@@ -341,6 +361,52 @@ test('task code resolves an explicit Herdr workspace ID and reapplies its color'
   assert.deepEqual(codeCall.args, [vscodeWorkspace]);
 });
 
+test('task checks infers the registered branch and forwards the one-shot retry option', () => {
+  const fixture = makeFixture();
+  const worktree = path.join(fixture.root, 'worktree');
+  fs.mkdirSync(worktree);
+  fs.mkdirSync(fixture.state, { recursive: true });
+  fs.writeFileSync(path.join(fixture.state, 'tasks.json'), JSON.stringify({
+    version: 1,
+    tasks: {
+      'XING-123': {
+        ticket: 'XING-123',
+        title: 'Improve recommendation tracking',
+        repo: fixture.repo,
+        branch: 'XING-123-improve-recommendation-tracking',
+        worktree,
+      },
+    },
+  }));
+
+  const result = spawnSync(process.execPath, [cli, 'checks', '--retry-once'], {
+    cwd: worktree,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const watcher = calls(fixture).find(({ command }) => command === 'watch-pr-checks');
+  assert.deepEqual(watcher.args, [
+    'XING-123-improve-recommendation-tracking',
+    'xing-com/crate',
+    '--retry-once',
+  ]);
+});
+
+test('task checks accepts an explicit pull request number without a registered task', () => {
+  const fixture = makeFixture();
+  const result = spawnSync(process.execPath, [cli, 'checks', '12345'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const watcher = calls(fixture).find(({ command }) => command === 'watch-pr-checks');
+  assert.deepEqual(watcher.args, ['12345', 'xing-com/crate']);
+});
+
 test('creates a local task without JIRA and uses origin/master', () => {
   const fixture = makeFixture();
   const result = spawnSync(process.execPath, [cli, 'local', 'Investigate', 'checkout', 'timeout'], {
@@ -355,7 +421,7 @@ test('creates a local task without JIRA and uses origin/master', () => {
   assert.equal(task.kind, 'local');
   assert.equal(task.ticket, null);
   assert.equal(task.title, 'Investigate checkout timeout');
-  assert.equal(task.branch, 'local-investigate-checkout-timeout');
+  assert.equal(task.branch, 'investigate-checkout-timeout');
 
   const recorded = calls(fixture);
   assert.equal(recorded.some(({ command }) => command === 'acli'), false);
@@ -365,6 +431,23 @@ test('creates a local task without JIRA and uses origin/master', () => {
   assert.deepEqual(worktree.args.slice(-2), [task.worktree, 'origin/master']);
   const prompt = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'agent prompt');
   assert.match(prompt.args[3], /local development task/);
+});
+
+test('falls back to origin/main when origin/master is unavailable', () => {
+  const fixture = makeFixture({ defaultBranch: 'main' });
+  const result = spawnSync(process.execPath, [cli, 'local', 'Investigate', 'main', 'checkout'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const registry = JSON.parse(fs.readFileSync(path.join(fixture.state, 'tasks.json'), 'utf8'));
+  const task = registry.tasks['NO-TICKET-INVESTIGATE-MAIN-CHECKOUT'];
+  const fetches = calls(fixture).filter(({ command, args }) => command === 'git' && args[0] === 'fetch');
+  assert.deepEqual(fetches.map(({ args }) => args), [['fetch', 'origin', 'master'], ['fetch', 'origin', 'main']]);
+  const worktree = calls(fixture).find(({ command, args }) => command === 'git' && args.slice(0, 2).join(' ') === 'worktree add');
+  assert.deepEqual(worktree.args.slice(-2), [task.worktree, 'origin/main']);
 });
 
 test('adopts an existing local branch and worktree without JIRA', () => {
@@ -423,4 +506,64 @@ test('previews and safely deletes a clean task while preserving its branch', () 
   const recorded = calls(fixture);
   assert.ok(recorded.some(({ command, args }) => command === 'herdr' && args.join(' ') === 'workspace close wT'));
   assert.ok(recorded.some(({ command, args }) => command === 'git' && args.join(' ') === `worktree remove ${task.worktree}`));
+});
+
+test('allows explicit force deletion when Git push status cannot be verified', () => {
+  const fixture = makeFixture({ unpushable: true });
+  const created = spawnSync(process.execPath, [cli, 'local', 'SEPA XING copy'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(created.status, 0, created.stderr);
+
+  const registryFile = path.join(fixture.state, 'tasks.json');
+  const task = JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-SEPA-XING-COPY'];
+  const blocked = spawnSync(process.execPath, [cli, 'delete', 'NO-TICKET-SEPA-XING-COPY'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /no branch upstream is configured/);
+
+  const forced = spawnSync(process.execPath, [cli, 'delete', 'NO-TICKET-SEPA-XING-COPY', '--yes', '--force'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stderr, /Skipping the pushed-commit check/);
+  assert.equal(fs.existsSync(task.worktree), false);
+  assert.equal(JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-SEPA-XING-COPY'], undefined);
+});
+
+test('force deletes a stale worktree whose Git metadata is gone', () => {
+  const fixture = makeFixture({ invalidWorktree: true });
+  const created = spawnSync(process.execPath, [cli, 'local', 'Stale checkout'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(created.status, 0, created.stderr);
+
+  const registryFile = path.join(fixture.state, 'tasks.json');
+  const task = JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-STALE-CHECKOUT'];
+  const blocked = spawnSync(process.execPath, [cli, 'delete', 'NO-TICKET-STALE-CHECKOUT', '--yes'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /Could not inspect worktree status/);
+
+  const forced = spawnSync(process.execPath, [cli, 'delete', 'NO-TICKET-STALE-CHECKOUT', '--yes', '--force'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stderr, /managed path directly/);
+  assert.equal(fs.existsSync(task.worktree), false);
+  assert.equal(JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-STALE-CHECKOUT'], undefined);
 });
