@@ -9,7 +9,7 @@ task XING-12345
   → branch from the latest available origin/master or origin/main
   → Git worktree + independent Herdr workspace
   → Herdr tabs: codex + terminal
-  → start Codex and send JIRA context
+  → start Codex, send JIRA context, and wait for instructions
   → assign a persistent curated task color
   → show the same color as a Herdr sidebar stripe
   → generate a .code-workspace with peacock.color
@@ -50,6 +50,7 @@ Required for all tasks:
 `watch-pr-checks` script. `jq` improves failure summaries and is optional.
 
 JIRA-backed tasks additionally require `acli` (Atlassian CLI).
+If `mise` is installed, the CLI runs `mise trust` in the task worktree.
 
 Install ACLI on macOS:
 
@@ -220,15 +221,16 @@ and registry entry, preview the cleanup first:
 ```bash
 task delete TASK-ID
 task delete TASK-ID --yes
-# Only when Git cannot verify push status; the branch is still preserved.
+# Discards local changes and skips Git push verification; branch is preserved.
 task delete TASK-ID --yes --force
 ```
 
 Deletion refuses dirty worktrees, branches with unpushed commits, and the
-repository's primary checkout. `--force` explicitly skips the pushed-commit
-verification. If the worktree's Git metadata is stale or missing, it can also
-remove that managed worktree path directly. The Git branch itself is preserved,
-so it can be adopted again later with `--branch`.
+repository's primary checkout. `--force` discards uncommitted and untracked
+worktree changes and skips pushed-commit verification. If the worktree's Git
+metadata is stale or missing, it can also remove that managed worktree path
+directly. The Git branch itself is preserved, so it can be adopted again later
+with `--branch`.
 
 ## State
 
@@ -257,6 +259,8 @@ Set `TASK_WORKFLOW_HOME` if you want these elsewhere.
 - JIRA descriptions are passed to the initial Codex prompt but are not retained
   in `tasks.json`; a missing Herdr workspace causes the description to be
   fetched again.
+- The initial Codex prompt asks it to read the ticket, make no changes, and wait
+  for instructions.
 - If Herdr's server/session loses the workspace but the Git worktree still exists, `task open XING-12345` reopens it and bootstraps fresh `codex` and `terminal` tabs.
-- Deletion is intentionally conservative: it requires `--yes`, refuses dirty
-  or unpushed work, and preserves the Git branch.
+- Deletion requires `--yes`, refuses dirty or unpushed work unless `--force` is
+  supplied, and preserves the Git branch.

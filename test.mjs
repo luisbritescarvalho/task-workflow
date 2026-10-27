@@ -11,7 +11,7 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
-function makeFixture({ authenticated = true, branchExists = false, checkedOut = false, defaultBranch = 'master', unpushable = false, invalidWorktree = false } = {}) {
+function makeFixture({ authenticated = true, branchExists = false, checkedOut = false, defaultBranch = 'master', unpushable = false, invalidWorktree = false, dirtyWorktree = false, mise = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'task-workflow-test-'));
   const bin = path.join(root, 'bin');
   const repo = path.join(root, 'repo');
@@ -27,7 +27,7 @@ import path from 'node:path';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
-fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ command, args }) + '\\n');
+fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ command, args, cwd: process.cwd() }) + '\\n');
 
 if (command === 'acli') {
   if (args.join(' ') === 'jira auth status') process.exit(process.env.FAKE_AUTH === 'ok' ? 0 : 1);
@@ -86,9 +86,10 @@ if (command === 'git') {
     fs.mkdirSync(worktree, { recursive: true });
   }
   else if (args[0] === 'status' && process.env.FAKE_INVALID_WORKTREE === 'yes') process.exit(1);
+  else if (args[0] === 'status' && process.env.FAKE_DIRTY_WORKTREE === 'yes') console.log('?? unsaved.txt');
   else if (args[0] === 'worktree' && args[1] === 'remove') {
     if (process.env.FAKE_INVALID_WORKTREE === 'yes') process.exit(1);
-    fs.rmSync(args[2], { recursive: true, force: true });
+    fs.rmSync(args.at(-1), { recursive: true, force: true });
   }
   process.exit(0);
 }
@@ -116,11 +117,15 @@ if (command === 'herdr') {
   process.exit(0);
 }
 
+if (command === 'mise' && args[0] === 'trust') process.exit(0);
+
 if (command === 'code' || command === 'codex' || command === 'open' || command === 'osascript' || command === 'watch-pr-checks') process.exit(0);
 process.exit(2);
 `);
 
-  for (const command of ['git', 'herdr', 'acli', 'code', 'codex', 'open', 'osascript', 'watch-pr-checks']) {
+  const commands = ['git', 'herdr', 'acli', 'code', 'codex', 'open', 'osascript', 'watch-pr-checks'];
+  if (mise) commands.push('mise');
+  for (const command of commands) {
     const wrapper = `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(stub)} ${shellQuote(command)} "$@"\n`;
     const file = path.join(bin, command);
     fs.writeFileSync(file, wrapper, { mode: 0o755 });
@@ -128,7 +133,7 @@ process.exit(2);
 
   const env = {
     ...process.env,
-    PATH: [bin, path.dirname(process.execPath), process.env.PATH].join(path.delimiter),
+    PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter),
     TASK_WORKFLOW_HOME: state,
     FAKE_AUTH: authenticated ? 'ok' : 'no',
     FAKE_LOG: log,
@@ -138,6 +143,7 @@ process.exit(2);
     FAKE_DEFAULT_BRANCH: defaultBranch,
     FAKE_UNPUSHABLE: unpushable ? 'yes' : 'no',
     FAKE_INVALID_WORKTREE: invalidWorktree ? 'yes' : 'no',
+    FAKE_DIRTY_WORKTREE: dirtyWorktree ? 'yes' : 'no',
     FAKE_CHECKED_OUT: checkedOut ? 'yes' : 'no',
     FAKE_WORKSPACE_EXISTS: 'yes',
     FAKE_EXISTING_WORKTREE: path.join(root, 'existing-worktree'),
@@ -155,7 +161,7 @@ function calls(fixture) {
 }
 
 test('creates a registered task from JIRA and origin/master', () => {
-  const fixture = makeFixture();
+  const fixture = makeFixture({ mise: true });
   const result = spawnSync(process.execPath, [cli, 'XING-123'], {
     cwd: fixture.repo,
     env: fixture.env,
@@ -189,6 +195,13 @@ test('creates a registered task from JIRA and origin/master', () => {
   assert.equal(recorded.some(({ command, args }) => command === 'herdr' && args[0] === 'worktree'), false);
   const prompt = recorded.find(({ command, args }) => command === 'herdr' && args.slice(0, 2).join(' ') === 'agent prompt');
   assert.match(prompt.args[3], /Track all clicks\./);
+  assert.match(prompt.args[3], /Read the ticket and inspect relevant context/);
+  assert.match(prompt.args[3], /Do not modify files or run commands that change the repository/);
+  assert.match(prompt.args[3], /wait for my instructions/);
+  const miseTrust = recorded.find(({ command, args }) => command === 'mise' && args[0] === 'trust');
+  assert.ok(miseTrust);
+  assert.equal(miseTrust.args.length, 1);
+  assert.equal(miseTrust.cwd, task.worktree);
 });
 
 test('opens JIRA and Figma links in a ticket-named Brave window', () => {
@@ -536,6 +549,39 @@ test('allows explicit force deletion when Git push status cannot be verified', (
   assert.match(forced.stderr, /Skipping the pushed-commit check/);
   assert.equal(fs.existsSync(task.worktree), false);
   assert.equal(JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-SEPA-XING-COPY'], undefined);
+});
+
+test('force deletes a dirty worktree and discards its uncommitted changes', () => {
+  const fixture = makeFixture({ dirtyWorktree: true });
+  const created = spawnSync(process.execPath, [cli, 'local', 'Dirty checkout'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(created.status, 0, created.stderr);
+
+  const registryFile = path.join(fixture.state, 'tasks.json');
+  const task = JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-DIRTY-CHECKOUT'];
+  const blocked = spawnSync(process.execPath, [cli, 'delete', 'NO-TICKET-DIRTY-CHECKOUT', '--yes'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /uncommitted or untracked changes/);
+
+  const forced = spawnSync(process.execPath, [cli, 'delete', 'NO-TICKET-DIRTY-CHECKOUT', '--yes', '--force'], {
+    cwd: fixture.repo,
+    env: fixture.env,
+    encoding: 'utf8',
+  });
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stderr, /discard uncommitted and untracked changes/);
+  assert.equal(fs.existsSync(task.worktree), false);
+  assert.equal(JSON.parse(fs.readFileSync(registryFile, 'utf8')).tasks['NO-TICKET-DIRTY-CHECKOUT'], undefined);
+  const remove = calls(fixture).find(({ command, args }) => command === 'git' && args[0] === 'worktree' && args[1] === 'remove' && args.includes(task.worktree));
+  assert.ok(remove);
+  assert.ok(remove.args.includes('--force'));
 });
 
 test('force deletes a stale worktree whose Git metadata is gone', () => {

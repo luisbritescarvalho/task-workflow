@@ -472,7 +472,7 @@ function bootstrapHerdr(task, ids, description) {
     '',
     `The repository worktree is ${task.worktree}.`,
     '',
-    'First inspect the relevant implementation and tests. Understand the existing approach before making substantial changes. Then propose a concise implementation plan and proceed with the task.',
+    `Read the ${taskIsJira(task) ? 'ticket' : 'task details'} and inspect relevant context to understand the request. Do not modify files or run commands that change the repository. Summarize your understanding, then wait for my instructions.`,
   ].filter(Boolean).join('\n');
 
   run('herdr', ['agent', 'prompt', ids.paneId, prompt]);
@@ -499,6 +499,12 @@ function openVsCode(file) {
   run('code', [file]);
 }
 
+function trustMiseConfig(worktree) {
+  if (!commandExists('mise')) return;
+  console.log('→ Trust mise config');
+  run('mise', ['trust'], { cwd: worktree });
+}
+
 function provisionTask(registry, { id, kind, ticket = null, title, description = '', repo, branch, existingWorktree = null, base = null }) {
   const branchOwner = Object.values(registry.tasks).find((task) => task.repo === repo && task.branch === branch);
   if (branchOwner) {
@@ -510,8 +516,9 @@ function provisionTask(registry, { id, kind, ticket = null, title, description =
   }
 
   const color = chooseColor(registry);
-  const label = kind === 'jira' ? `${ticket} · ${title}` : `NO-TICKET · ${title}`;
+  const label = kind === 'jira' ? `${ticket} · ${title}` : title;
   const worktree = existingWorktree || createGitWorktree(repo, branch, base);
+  trustMiseConfig(worktree);
 
   const task = {
     id,
@@ -752,7 +759,10 @@ function deleteTask(taskInput, options = {}) {
       if (!options.force) fail(`Could not inspect worktree status for ${id}.`);
       console.warn(`⚠ Could not inspect worktree status; --force will remove the managed path if confirmed.`);
     } else if ((status.stdout || '').trim()) {
-      fail(`Refusing to remove ${id}: the worktree has uncommitted or untracked changes.`);
+      if (!options.force) {
+        fail(`Refusing to remove ${id}: the worktree has uncommitted or untracked changes.`);
+      }
+      console.warn(`⚠ --force will discard uncommitted and untracked changes in ${id}.`);
     }
   }
 
@@ -800,7 +810,7 @@ function deleteTask(taskInput, options = {}) {
     run('herdr', ['workspace', 'close', task.herdrWorkspaceId], { allowFailure: options.force });
   }
   if (worktreeExists) {
-    const removed = run('git', ['worktree', 'remove', task.worktree], {
+    const removed = run('git', ['worktree', 'remove', ...(options.force ? ['--force'] : []), task.worktree], {
       cwd: repo,
       inherit: true,
       allowFailure: options.force,
@@ -1042,7 +1052,7 @@ function doctor() {
 }
 
 function help() {
-  console.log('  task delete TASK-ID --yes --force  Force cleanup when Git push status cannot be verified');
+  console.log('  task delete TASK-ID --yes --force  Discard local changes and force cleanup');
   console.log(`task-workflow\n\nUsage:\n  task XING-12345        Create a JIRA task from the current repo, or open it\n  task XING-12345 --branch EXISTING-BRANCH\n                         Adopt an existing JIRA task branch/worktree\n  task local "TITLE"     Create or open a task without a JIRA ticket\n  task local --branch BRANCH ["TITLE"]\n                         Adopt an existing local branch/worktree\n  task open TASK-ID      Reopen/focus Herdr + VS Code\n  task code [TASK-ID]    Open/focus the task's VS Code workspace\n  task code --herdr-workspace ID\n                         Open/focus VS Code for a Herdr workspace\n  task checks [TASK-ID|PR|BRANCH]\n                         Watch PR checks and notify on failures\n  task checks ... --retry-once\n                         Rerun failed GitHub Actions once when eligible\n  task watch [TASK-ID|PR|BRANCH]\n                         Alias for task checks\n  task jira [JIRA-ID]    Open the JIRA ticket in the default browser\n  task figma [JIRA-ID]   Open the first Figma link found on the ticket\n  task list              List registered tasks\n  task doctor            Check commands, authentication, Herdr, and Peacock\n  task delete TASK-ID    Preview safe local cleanup (use --yes to apply)\n\nEnvironment:\n  TASK_WORKFLOW_HOME     Override state directory (default: ~/.local/share/task-workflow)`);
 }
 
